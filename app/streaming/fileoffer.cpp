@@ -55,12 +55,14 @@ bool readUnsigned(const QJsonValue& value, quint64& out)
 bool isReservedName(const QString& component)
 {
     static const QSet<QString> reserved = {
-        QStringLiteral("CON"),  QStringLiteral("PRN"),  QStringLiteral("AUX"),  QStringLiteral("NUL"),
-        QStringLiteral("COM1"), QStringLiteral("COM2"), QStringLiteral("COM3"), QStringLiteral("COM4"),
-        QStringLiteral("COM5"), QStringLiteral("COM6"), QStringLiteral("COM7"), QStringLiteral("COM8"),
-        QStringLiteral("COM9"), QStringLiteral("LPT1"), QStringLiteral("LPT2"), QStringLiteral("LPT3"),
-        QStringLiteral("LPT4"), QStringLiteral("LPT5"), QStringLiteral("LPT6"), QStringLiteral("LPT7"),
-        QStringLiteral("LPT8"), QStringLiteral("LPT9"), QStringLiteral("CONIN$"), QStringLiteral("CONOUT$"),
+        QStringLiteral("CON"),  QStringLiteral("PRN"),    QStringLiteral("AUX"),
+        QStringLiteral("NUL"),  QStringLiteral("COM1"),   QStringLiteral("COM2"),
+        QStringLiteral("COM3"), QStringLiteral("COM4"),   QStringLiteral("COM5"),
+        QStringLiteral("COM6"), QStringLiteral("COM7"),   QStringLiteral("COM8"),
+        QStringLiteral("COM9"), QStringLiteral("LPT1"),   QStringLiteral("LPT2"),
+        QStringLiteral("LPT3"), QStringLiteral("LPT4"),   QStringLiteral("LPT5"),
+        QStringLiteral("LPT6"), QStringLiteral("LPT7"),   QStringLiteral("LPT8"),
+        QStringLiteral("LPT9"), QStringLiteral("CONIN$"), QStringLiteral("CONOUT$"),
     };
     const QString base = component.section(QLatin1Char('.'), 0, 0).trimmed().toUpper();
     return reserved.contains(base);
@@ -68,7 +70,8 @@ bool isReservedName(const QString& component)
 
 bool isValidComponent(const QString& component)
 {
-    if (component.isEmpty() || component == QStringLiteral(".") || component == QStringLiteral("..")) {
+    if (component.isEmpty() || component == QStringLiteral(".") ||
+        component == QStringLiteral("..")) {
         return false;
     }
     for (const QChar c : component) {
@@ -97,7 +100,8 @@ bool FileOffer::parse(const QByteArray& json, FileOffer& out, QString* error)
     const QJsonObject obj = doc.object();
 
     out.id = obj.value(QStringLiteral("id")).toString();
-    static const QRegularExpression idPattern(QStringLiteral("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"));
+    static const QRegularExpression idPattern(
+        QStringLiteral("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"));
     if (!idPattern.match(out.id).hasMatch()) {
         return fail(error, QStringLiteral("bad id"));
     }
@@ -114,8 +118,8 @@ bool FileOffer::parse(const QByteArray& json, FileOffer& out, QString* error)
         return fail(error, QStringLiteral("bad entry count"));
     }
 
-    QSet<QString> seen;     // every path, case-folded (Windows names are case-insensitive)
-    QSet<QString> folders;  // folder paths, case-folded
+    QSet<QString> seen;    // every path, case-folded (Windows names are case-insensitive)
+    QSet<QString> folders; // folder paths, case-folded
     out.entries.reserve(static_cast<size_t>(files.size()));
     for (const QJsonValue& value : files) {
         if (!value.isObject()) {
@@ -129,7 +133,8 @@ bool FileOffer::parse(const QByteArray& json, FileOffer& out, QString* error)
             return fail(error, QStringLiteral("bad size"));
         }
         quint64 mtime = 0;
-        if (file.contains(QStringLiteral("mtime")) && !readUnsigned(file.value(QStringLiteral("mtime")), mtime)) {
+        if (file.contains(QStringLiteral("mtime")) &&
+            !readUnsigned(file.value(QStringLiteral("mtime")), mtime)) {
             mtime = 0;
         }
 
@@ -148,7 +153,8 @@ bool FileOffer::parse(const QByteArray& json, FileOffer& out, QString* error)
             return fail(error, QStringLiteral("duplicate path"));
         }
         if (components.size() > 1) {
-            const QString parent = components.mid(0, components.size() - 1).join(QLatin1Char('\\')).toCaseFolded();
+            const QString parent =
+                components.mid(0, components.size() - 1).join(QLatin1Char('\\')).toCaseFolded();
             if (!folders.contains(parent)) {
                 return fail(error, QStringLiteral("entry before its folder"));
             }
@@ -182,16 +188,16 @@ constexpr qint64 HIGH_WATER = 4 * 1024 * 1024;
 constexpr qint64 LOW_WATER = 1 * 1024 * 1024;
 constexpr qint64 REPLY_BUFFER = 1 * 1024 * 1024;
 // A paste that sees no byte for this long fails instead of hanging the target.
-constexpr std::chrono::seconds STALL_TIMEOUT{60};
+constexpr std::chrono::seconds STALL_TIMEOUT{ 60 };
 
 struct StreamState
 {
     std::mutex mutex;
     std::condition_variable changed;
     std::deque<QByteArray> chunks;
-    qint64 headOffset = 0;   // bytes of chunks.front() already handed out
-    qint64 buffered = 0;     // bytes waiting in chunks
-    quint64 expected = 0;    // bytes this response must carry
+    qint64 headOffset = 0; // bytes of chunks.front() already handed out
+    qint64 buffered = 0;   // bytes waiting in chunks
+    quint64 expected = 0;  // bytes this response must carry
     quint64 received = 0;
     bool done = false;
     bool failed = false;
@@ -209,7 +215,7 @@ struct FileOfferDownloader::Core
     std::vector<VirtualFiles::Entry> entries;
 
     QThread thread;
-    QObject* context = nullptr;          // lives on `thread`
+    QObject* context = nullptr;           // lives on `thread`
     QNetworkAccessManager* nam = nullptr; // child of context
 
     Core(const ClipboardSyncHostContext& h, const FileOffer& offer)
@@ -300,13 +306,15 @@ struct FileOfferDownloader::Core
         url.setPath(QStringLiteral("/api/v1/file-transfer/%1/%2").arg(offerId).arg(index));
 
         QNetworkRequest request(url);
-        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                             QNetworkRequest::ManualRedirectPolicy);
         QSslConfiguration ssl(QSslConfiguration::defaultConfiguration());
         ssl.setLocalCertificate(host.clientCertificate);
         ssl.setPrivateKey(host.clientPrivateKey);
         request.setSslConfiguration(ssl);
         if (offset != 0) {
-            request.setRawHeader("Range", QByteArrayLiteral("bytes=") + QByteArray::number(offset) + '-');
+            request.setRawHeader("Range",
+                                 QByteArrayLiteral("bytes=") + QByteArray::number(offset) + '-');
         }
 
         QNetworkReply* reply = nam->get(request);
@@ -403,7 +411,8 @@ public:
             ClipboardLog::warn("FileOffer: download stalled");
             const auto st = m_State;
             QMetaObject::invokeMethod(
-                m_Core->context, [st]() { FileOfferDownloader::Core::failStream(st); }, Qt::QueuedConnection);
+                m_Core->context, [st]() { FileOfferDownloader::Core::failStream(st); },
+                Qt::QueuedConnection);
             return -1;
         }
         if (m_State->buffered == 0) {
@@ -416,7 +425,8 @@ public:
             const QByteArray& front = m_State->chunks.front();
             const qint64 available = front.size() - m_State->headOffset;
             const qint64 take = std::min<qint64>(available, static_cast<qint64>(size) - copied);
-            std::memcpy(out + copied, front.constData() + m_State->headOffset, static_cast<size_t>(take));
+            std::memcpy(out + copied, front.constData() + m_State->headOffset,
+                        static_cast<size_t>(take));
             copied += take;
             m_State->headOffset += take;
             if (m_State->headOffset == front.size()) {
@@ -430,7 +440,8 @@ public:
         if (refill) {
             const auto st = m_State;
             QMetaObject::invokeMethod(
-                m_Core->context, [st]() { FileOfferDownloader::Core::pump(st); }, Qt::QueuedConnection);
+                m_Core->context, [st]() { FileOfferDownloader::Core::pump(st); },
+                Qt::QueuedConnection);
         }
         return copied;
     }
@@ -442,14 +453,16 @@ private:
 
 } // namespace
 
-FileOfferDownloader::FileOfferDownloader(const ClipboardSyncHostContext& host, const FileOffer& offer)
+FileOfferDownloader::FileOfferDownloader(const ClipboardSyncHostContext& host,
+                                         const FileOffer& offer)
     : m_Core(std::make_shared<Core>(host, offer))
 {
 }
 
 FileOfferDownloader::~FileOfferDownloader() = default;
 
-std::unique_ptr<VirtualFiles::Reader> FileOfferDownloader::open(std::size_t index, std::uint64_t offset)
+std::unique_ptr<VirtualFiles::Reader> FileOfferDownloader::open(std::size_t index,
+                                                                std::uint64_t offset)
 {
     if (index >= m_Core->entries.size() || m_Core->entries[index].dir ||
         offset > m_Core->entries[index].size) {
@@ -464,6 +477,7 @@ std::unique_ptr<VirtualFiles::Reader> FileOfferDownloader::open(std::size_t inde
     }
     Core* core = m_Core.get();
     QMetaObject::invokeMethod(
-        core->context, [core, st, index, offset]() { core->start(st, index, offset); }, Qt::QueuedConnection);
+        core->context, [core, st, index, offset]() { core->start(st, index, offset); },
+        Qt::QueuedConnection);
     return std::make_unique<HttpReader>(m_Core, st);
 }

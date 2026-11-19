@@ -716,7 +716,8 @@ void ClipboardSync::applyInboundFileOffer(const QByteArray& payload)
     FileOffer offer;
     QString error;
     if (!FileOffer::parse(payload, offer, &error)) {
-        ClipboardLog::warn("ClipboardSync: dropping inbound file offer (%s)", error.toUtf8().constData());
+        ClipboardLog::warn("ClipboardSync: dropping inbound file offer (%s)",
+                           error.toUtf8().constData());
         return;
     }
 
@@ -731,7 +732,8 @@ void ClipboardSync::applyInboundFileOffer(const QByteArray& payload)
     if (clipboardBridgeNeeded()) {
         QMetaObject::invokeMethod(
             m_Bridge,
-            [bridge = QPointer<ClipboardBridge>(m_Bridge), entries = offer.entries, source, &ok]() mutable {
+            [bridge = QPointer<ClipboardBridge>(m_Bridge), entries = offer.entries, source,
+             &ok]() mutable {
                 if (bridge != nullptr) {
                     ok = bridge->writeVirtualFiles(std::move(entries), std::move(source));
                 }
@@ -741,14 +743,15 @@ void ClipboardSync::applyInboundFileOffer(const QByteArray& payload)
         ok = m_Bridge->writeVirtualFiles(offer.entries, source);
     }
     if (ok) {
-        ClipboardLog::info("ClipboardSync: host files on the clipboard (%d entries, %llu bytes)", count,
-                           static_cast<unsigned long long>(offer.totalSize));
+        ClipboardLog::info("ClipboardSync: host files on the clipboard (%d entries, %llu bytes)",
+                           count, static_cast<unsigned long long>(offer.totalSize));
     } else {
         ClipboardLog::warn("ClipboardSync: could not put the host's files on the clipboard");
     }
 #else
-    ClipboardLog::info("ClipboardSync: host offered %d files; pasting them is supported on Windows only",
-                       static_cast<int>(offer.entries.size()));
+    ClipboardLog::info(
+        "ClipboardSync: host offered %d files; pasting them is supported on Windows only",
+        static_cast<int>(offer.entries.size()));
 #endif
 }
 

@@ -51,8 +51,10 @@ private:
                 return -1;
             }
             // Short reads: the stream must keep asking until the request is filled.
-            const std::uint64_t left = m_Data->size() - std::min<std::uint64_t>(m_Position, m_Data->size());
-            const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::uint64_t>({left, size, 7}));
+            const std::uint64_t left =
+                m_Data->size() - std::min<std::uint64_t>(m_Position, m_Data->size());
+            const std::uint32_t n =
+                static_cast<std::uint32_t>(std::min<std::uint64_t>({ left, size, 7 }));
             std::memcpy(buffer, m_Data->data() + m_Position, n);
             m_Position += n;
             return n;
@@ -108,10 +110,11 @@ int main()
     for (std::size_t i = 0; i < big.size(); ++i) {
         big[i] = static_cast<char>((i * 31) & 0xFF);
     }
-    source->files = {"hello world", "", big};
+    source->files = { "hello world", "", big };
 
-    check(VirtualFileClipboard::set({entry(u"a.txt", 11), entry(u"dir", 0, true), entry(u"dir\\b.bin", big.size())},
-                                    source),
+    check(VirtualFileClipboard::set(
+              { entry(u"a.txt", 11), entry(u"dir", 0, true), entry(u"dir\\b.bin", big.size()) },
+              source),
           "set puts the files on the clipboard");
     check(VirtualFileClipboard::ownsClipboard(), "owns the clipboard after set");
     check(source->opens.empty(), "nothing is read before a paste");
@@ -123,13 +126,16 @@ int main()
     }
 
     // Descriptor
-    FORMATETC fd = {format(L"FileGroupDescriptorW"), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    FORMATETC fd = { format(L"FileGroupDescriptorW"), nullptr, DVASPECT_CONTENT, -1,
+                     TYMED_HGLOBAL };
     STGMEDIUM medium = {};
-    check(SUCCEEDED(clip->GetData(&fd, &medium)) && medium.tymed == TYMED_HGLOBAL, "descriptor available");
+    check(SUCCEEDED(clip->GetData(&fd, &medium)) && medium.tymed == TYMED_HGLOBAL,
+          "descriptor available");
     if (medium.hGlobal != nullptr) {
         auto* group = static_cast<FILEGROUPDESCRIPTORW*>(GlobalLock(medium.hGlobal));
         check(group->cItems == 3, "three descriptors");
-        check(std::wcscmp(group->fgd[0].cFileName, L"a.txt") == 0 && group->fgd[0].nFileSizeLow == 11,
+        check(std::wcscmp(group->fgd[0].cFileName, L"a.txt") == 0 &&
+                  group->fgd[0].nFileSizeLow == 11,
               "file name and size");
         check((group->fgd[1].dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, "folder attribute");
         check(std::wcscmp(group->fgd[2].cFileName, L"dir\\b.bin") == 0 &&
@@ -143,7 +149,8 @@ int main()
     }
 
     // Preferred drop effect
-    FORMATETC effect = {format(L"Preferred DropEffect"), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    FORMATETC effect = { format(L"Preferred DropEffect"), nullptr, DVASPECT_CONTENT, -1,
+                         TYMED_HGLOBAL };
     medium = {};
     if (SUCCEEDED(clip->GetData(&effect, &medium))) {
         check(*static_cast<DWORD*>(GlobalLock(medium.hGlobal)) == DROPEFFECT_COPY, "paste copies");
@@ -154,24 +161,29 @@ int main()
     }
 
     // Contents
-    FORMATETC contents = {format(L"FileContents"), nullptr, DVASPECT_CONTENT, 2, TYMED_ISTREAM};
+    FORMATETC contents = { format(L"FileContents"), nullptr, DVASPECT_CONTENT, 2, TYMED_ISTREAM };
     medium = {};
-    check(SUCCEEDED(clip->GetData(&contents, &medium)) && medium.tymed == TYMED_ISTREAM, "stream for a file");
+    check(SUCCEEDED(clip->GetData(&contents, &medium)) && medium.tymed == TYMED_ISTREAM,
+          "stream for a file");
     if (medium.pstm != nullptr) {
         STATSTG stat = {};
-        check(SUCCEEDED(medium.pstm->Stat(&stat, STATFLAG_NONAME)) && stat.cbSize.QuadPart == big.size(),
+        check(SUCCEEDED(medium.pstm->Stat(&stat, STATFLAG_NONAME)) &&
+                  stat.cbSize.QuadPart == big.size(),
               "stream size");
         check(readStream(medium.pstm, 4096) == big, "stream bytes");
         ULONG got = 1;
         char byte = 0;
-        check(medium.pstm->Read(&byte, 1, &got) == S_FALSE && got == 0, "read at the end returns nothing");
+        check(medium.pstm->Read(&byte, 1, &got) == S_FALSE && got == 0,
+              "read at the end returns nothing");
 
         LARGE_INTEGER to;
         to.QuadPart = 50000;
         ULARGE_INTEGER now = {};
-        check(SUCCEEDED(medium.pstm->Seek(to, STREAM_SEEK_SET, &now)) && now.QuadPart == 50000, "seek");
+        check(SUCCEEDED(medium.pstm->Seek(to, STREAM_SEEK_SET, &now)) && now.QuadPart == 50000,
+              "seek");
         check(readStream(medium.pstm, 65536) == big.substr(50000), "read after a seek");
-        check(!source->opens.empty() && source->opens.back() == std::make_pair(std::size_t(2), std::uint64_t(50000)),
+        check(!source->opens.empty() &&
+                  source->opens.back() == std::make_pair(std::size_t(2), std::uint64_t(50000)),
               "a seek reopens at the new offset");
         ReleaseStgMedium(&medium);
     }
@@ -200,7 +212,8 @@ int main()
     if (SUCCEEDED(clip->GetData(&contents, &medium))) {
         char buffer[16];
         ULONG got = 0;
-        check(FAILED(medium.pstm->Read(buffer, sizeof(buffer), &got)) && got == 0, "failed source fails the read");
+        check(FAILED(medium.pstm->Read(buffer, sizeof(buffer), &got)) && got == 0,
+              "failed source fails the read");
         ReleaseStgMedium(&medium);
     }
     source->fail = false;
@@ -213,10 +226,11 @@ int main()
     }
     check(!VirtualFileClipboard::ownsClipboard(), "ownership ends when another program copies");
 
-    check(VirtualFileClipboard::set({entry(u"a.txt", 11)}, source), "set again");
+    check(VirtualFileClipboard::set({ entry(u"a.txt", 11) }, source), "set again");
     VirtualFileClipboard::clearIfOwned();
     check(!VirtualFileClipboard::ownsClipboard(), "clear empties the clipboard");
-    check(!IsClipboardFormatAvailable(format(L"FileGroupDescriptorW")), "no descriptor after clear");
+    check(!IsClipboardFormatAvailable(format(L"FileGroupDescriptorW")),
+          "no descriptor after clear");
 
     OleUninitialize();
     if (g_Failures != 0) {

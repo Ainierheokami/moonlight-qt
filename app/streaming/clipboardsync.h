@@ -142,10 +142,11 @@ class ClipboardSync : public QObject
     Q_OBJECT
 
 public:
-    enum Kind : uint8_t {
+    enum Kind : uint8_t
+    {
         KIND_TEXT = 1,
-        KIND_PNG  = 2,
-        KIND_REF  = 3,
+        KIND_PNG = 2,
+        KIND_REF = 3,
         KIND_FILE_OFFER = 4,
     };
 

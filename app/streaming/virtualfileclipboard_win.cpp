@@ -14,7 +14,9 @@ namespace {
 
 // IDataObjectAsyncCapability from shobjidl_core.h, declared here with its IID
 // because MinGW's headers lack it. The method order is the interface's.
-const IID IID_AsyncCapability = {0x3D8B0590, 0xF691, 0x11d2, {0x8E, 0xA9, 0x00, 0x60, 0x97, 0xDF, 0x5B, 0xD4}};
+const IID IID_AsyncCapability = {
+    0x3D8B0590, 0xF691, 0x11d2, { 0x8E, 0xA9, 0x00, 0x60, 0x97, 0xDF, 0x5B, 0xD4 }
+};
 
 struct IAsyncCapability : public IUnknown
 {
@@ -22,12 +24,14 @@ struct IAsyncCapability : public IUnknown
     virtual HRESULT STDMETHODCALLTYPE GetAsyncMode(BOOL* isOpAsync) = 0;
     virtual HRESULT STDMETHODCALLTYPE StartOperation(IBindCtx* reserved) = 0;
     virtual HRESULT STDMETHODCALLTYPE InOperation(BOOL* inAsyncOp) = 0;
-    virtual HRESULT STDMETHODCALLTYPE EndOperation(HRESULT result, IBindCtx* reserved, DWORD effects) = 0;
+    virtual HRESULT STDMETHODCALLTYPE EndOperation(HRESULT result, IBindCtx* reserved,
+                                                   DWORD effects) = 0;
 };
 
 CLIPFORMAT descriptorFormat()
 {
-    static const CLIPFORMAT cf = static_cast<CLIPFORMAT>(RegisterClipboardFormatW(L"FileGroupDescriptorW"));
+    static const CLIPFORMAT cf =
+        static_cast<CLIPFORMAT>(RegisterClipboardFormatW(L"FileGroupDescriptorW"));
     return cf;
 }
 
@@ -39,7 +43,8 @@ CLIPFORMAT contentsFormat()
 
 CLIPFORMAT dropEffectFormat()
 {
-    static const CLIPFORMAT cf = static_cast<CLIPFORMAT>(RegisterClipboardFormatW(L"Preferred DropEffect"));
+    static const CLIPFORMAT cf =
+        static_cast<CLIPFORMAT>(RegisterClipboardFormatW(L"Preferred DropEffect"));
     return cf;
 }
 
@@ -63,7 +68,8 @@ std::wstring toWide(const std::u16string& s)
 class FileStream final : public IStream
 {
 public:
-    FileStream(std::shared_ptr<VirtualFiles::Source> source, std::size_t index, const VirtualFiles::Entry& entry)
+    FileStream(std::shared_ptr<VirtualFiles::Source> source, std::size_t index,
+               const VirtualFiles::Entry& entry)
         : m_Source(std::move(source)), m_Index(index), m_Size(entry.size)
     {
         const std::wstring path = toWide(entry.path);
@@ -149,7 +155,8 @@ public:
     }
 
     // IStream
-    HRESULT STDMETHODCALLTYPE Seek(LARGE_INTEGER move, DWORD origin, ULARGE_INTEGER* newPosition) override
+    HRESULT STDMETHODCALLTYPE Seek(LARGE_INTEGER move, DWORD origin,
+                                   ULARGE_INTEGER* newPosition) override
     {
         LONGLONG base = 0;
         switch (origin) {
@@ -179,7 +186,8 @@ public:
 
     HRESULT STDMETHODCALLTYPE SetSize(ULARGE_INTEGER) override { return STG_E_ACCESSDENIED; }
 
-    HRESULT STDMETHODCALLTYPE CopyTo(IStream* target, ULARGE_INTEGER size, ULARGE_INTEGER* read, ULARGE_INTEGER* written) override
+    HRESULT STDMETHODCALLTYPE CopyTo(IStream* target, ULARGE_INTEGER size, ULARGE_INTEGER* read,
+                                     ULARGE_INTEGER* written) override
     {
         if (target == nullptr) {
             return STG_E_INVALIDPOINTER;
@@ -219,8 +227,14 @@ public:
 
     HRESULT STDMETHODCALLTYPE Commit(DWORD) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE Revert() override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return STG_E_INVALIDFUNCTION; }
-    HRESULT STDMETHODCALLTYPE UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return STG_E_INVALIDFUNCTION; }
+    HRESULT STDMETHODCALLTYPE LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override
+    {
+        return STG_E_INVALIDFUNCTION;
+    }
+    HRESULT STDMETHODCALLTYPE UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override
+    {
+        return STG_E_INVALIDFUNCTION;
+    }
 
     HRESULT STDMETHODCALLTYPE Stat(STATSTG* stat, DWORD flags) override
     {
@@ -254,7 +268,7 @@ public:
 private:
     ~FileStream() = default;
 
-    std::atomic<ULONG> m_Refs{1};
+    std::atomic<ULONG> m_Refs{ 1 };
     std::shared_ptr<VirtualFiles::Source> m_Source;
     std::size_t m_Index;
     std::uint64_t m_Size;
@@ -267,7 +281,8 @@ private:
 class FileDataObject final : public IDataObject, public IAsyncCapability
 {
 public:
-    FileDataObject(std::vector<VirtualFiles::Entry> entries, std::shared_ptr<VirtualFiles::Source> source)
+    FileDataObject(std::vector<VirtualFiles::Entry> entries,
+                   std::shared_ptr<VirtualFiles::Source> source)
         : m_Entries(std::move(entries)), m_Source(std::move(source))
     {
     }
@@ -356,7 +371,8 @@ public:
                 return DV_E_TYMED;
             }
             // lindex -1 (whole clipboard, as a clipboard viewer asks) has no contents to give.
-            if (format->lindex < 0 || static_cast<std::size_t>(format->lindex) >= m_Entries.size() ||
+            if (format->lindex < 0 ||
+                static_cast<std::size_t>(format->lindex) >= m_Entries.size() ||
                 m_Entries[static_cast<std::size_t>(format->lindex)].dir) {
                 return DV_E_LINDEX;
             }
@@ -392,16 +408,22 @@ public:
             return E_NOTIMPL;
         }
         FORMATETC formats[] = {
-            {descriptorFormat(), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL},
-            {contentsFormat(), nullptr, DVASPECT_CONTENT, -1, TYMED_ISTREAM},
-            {dropEffectFormat(), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL},
+            { descriptorFormat(), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL },
+            { contentsFormat(), nullptr, DVASPECT_CONTENT, -1, TYMED_ISTREAM },
+            { dropEffectFormat(), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL },
         };
         return SHCreateStdEnumFmtEtc(ARRAYSIZE(formats), formats, out);
     }
 
-    HRESULT STDMETHODCALLTYPE DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) override { return OLE_E_ADVISENOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) override
+    {
+        return OLE_E_ADVISENOTSUPPORTED;
+    }
     HRESULT STDMETHODCALLTYPE DUnadvise(DWORD) override { return OLE_E_ADVISENOTSUPPORTED; }
-    HRESULT STDMETHODCALLTYPE EnumDAdvise(IEnumSTATDATA**) override { return OLE_E_ADVISENOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE EnumDAdvise(IEnumSTATDATA**) override
+    {
+        return OLE_E_ADVISENOTSUPPORTED;
+    }
 
     // IDataObjectAsyncCapability: lets Explorer copy on its own worker thread.
     HRESULT STDMETHODCALLTYPE SetAsyncMode(BOOL doOpAsync) override
@@ -442,7 +464,8 @@ private:
     HGLOBAL makeDescriptor() const
     {
         const std::size_t count = m_Entries.size();
-        const std::size_t bytes = sizeof(FILEGROUPDESCRIPTORW) + (count > 0 ? count - 1 : 0) * sizeof(FILEDESCRIPTORW);
+        const std::size_t bytes =
+            sizeof(FILEGROUPDESCRIPTORW) + (count > 0 ? count - 1 : 0) * sizeof(FILEDESCRIPTORW);
         HGLOBAL global = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
         if (global == nullptr) {
             return nullptr;
@@ -452,7 +475,8 @@ private:
         for (std::size_t i = 0; i < count; ++i) {
             const VirtualFiles::Entry& entry = m_Entries[i];
             FILEDESCRIPTORW& fd = group->fgd[i];
-            fd.dwFlags = FD_ATTRIBUTES | FD_FILESIZE | FD_PROGRESSUI | static_cast<DWORD>(FD_UNICODE);
+            fd.dwFlags =
+                FD_ATTRIBUTES | FD_FILESIZE | FD_PROGRESSUI | static_cast<DWORD>(FD_UNICODE);
             fd.dwFileAttributes = entry.dir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
             fd.nFileSizeHigh = static_cast<DWORD>(entry.size >> 32);
             fd.nFileSizeLow = static_cast<DWORD>(entry.size & 0xFFFFFFFFULL);
@@ -469,7 +493,7 @@ private:
         return global;
     }
 
-    std::atomic<ULONG> m_Refs{1};
+    std::atomic<ULONG> m_Refs{ 1 };
     std::vector<VirtualFiles::Entry> m_Entries;
     std::shared_ptr<VirtualFiles::Source> m_Source;
     bool m_Async = true;
@@ -504,13 +528,14 @@ bool set(std::vector<VirtualFiles::Entry> entries, std::shared_ptr<VirtualFiles:
         Sleep(20);
     }
     if (FAILED(hr)) {
-        std::fprintf(stderr, "ClipboardSync WARN: VirtualFileClipboard: OleSetClipboard failed (0x%08lx)\n",
+        std::fprintf(stderr,
+                     "ClipboardSync WARN: VirtualFileClipboard: OleSetClipboard failed (0x%08lx)\n",
                      static_cast<unsigned long>(hr));
         object->Release();
         return false;
     }
     releaseCurrent();
-    g_Current = object;  // keeps the creation reference
+    g_Current = object; // keeps the creation reference
     return true;
 }
 
