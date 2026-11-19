@@ -39,5 +39,5 @@ HEADERS += ../app/streaming/fileoffer.h ../app/streaming/virtualfilesource.h
 win32 {
     SOURCES += ../app/streaming/virtualfileclipboard_win.cpp
     HEADERS += ../app/streaming/virtualfileclipboard_win.h
-    LIBS += -lole32 -lshell32
+    LIBS += -lole32 -lshell32 -luser32
 }
