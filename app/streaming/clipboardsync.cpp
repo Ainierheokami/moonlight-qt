@@ -4,6 +4,7 @@
 #include "backend/pairedcertificate.h"
 
 #include <QBuffer>
+#include <QDir>
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QImage>
@@ -147,8 +148,8 @@ bool looksLikePngBytes(const QByteArray& bytes)
 }
 
 ClipboardSync::ClipboardSync(const ClipboardSyncHostContext& hostContext, QObject* parent)
-    : QObject(parent),
-      m_HostContext(hostContext)
+    : QObject(parent), m_HostContext(hostContext),
+      m_LocalFileOffers(std::make_unique<LocalFileOffers>())
 {
     qRegisterMetaType<QByteArray>("QByteArray");
 #ifndef Q_OS_MACOS
@@ -534,6 +535,9 @@ void ClipboardSync::stop(bool waitForBridge)
     m_Active = false;
     beginClipboardChange();
     m_RetiredTokens.clear();
+    // The host cannot paste them after the session.
+    m_LocalFileOffers->clear();
+    m_LastOfferedPaths.clear();
     m_HaveClipboardSnapshot = false;
 #ifdef Q_OS_MACOS
     if (m_PasteboardPollTimer != nullptr) {
@@ -610,6 +614,10 @@ void ClipboardSync::onIncomingFrame(QByteArray frame)
 
     if (kind == KIND_FILE_OFFER) {
         applyInboundFileOffer(payload);
+        return;
+    }
+    if (kind == KIND_FILE_PULL) {
+        serveFilePull(payload);
         return;
     }
     if (kind != KIND_TEXT && kind != KIND_PNG && kind != KIND_REF) {
@@ -753,6 +761,102 @@ void ClipboardSync::applyInboundFileOffer(const QByteArray& payload)
         "ClipboardSync: host offered %d files; pasting them is supported on Windows only",
         static_cast<int>(offer.entries.size()));
 #endif
+}
+
+bool ClipboardSync::offerLocalFiles(const QMimeData* mime)
+{
+#ifdef Q_OS_WIN
+    QStringList paths;
+    if (mime != nullptr && mime->hasUrls()) {
+        for (const QUrl& url : mime->urls()) {
+            if (url.isLocalFile()) {
+                paths.append(QDir::toNativeSeparators(url.toLocalFile()));
+            }
+        }
+    }
+    if (paths.isEmpty()) {
+        return false;
+    }
+    // Explorer can announce one copy more than once.
+    if (paths == m_LastOfferedPaths && m_LastOfferedAtMs >= 0 &&
+        m_Clock.elapsed() - m_LastOfferedAtMs < 2000) {
+        return true;
+    }
+    m_LastOfferedPaths = paths;
+    m_LastOfferedAtMs = m_Clock.elapsed();
+
+    QByteArray json;
+    QString error;
+    if (!m_LocalFileOffers->add(paths, json, &error)) {
+        ClipboardLog::warn("ClipboardSync: copied files not offered to the host (%s)",
+                           error.toUtf8().constData());
+        return true;
+    }
+    ClipboardLog::info("ClipboardSync: offering %d copied path(s) to the host",
+                       static_cast<int>(paths.size()));
+    if (shouldTransferOutOfBand(json.size())) {
+        uploadAndSendRef(json, QStringLiteral("application/vnd.sunshine.file-offer+json"));
+        return true;
+    }
+    QByteArray frame;
+    if (encodeFrame(KIND_FILE_OFFER, 0, json, frame)) {
+        emit outboundFrame(frame);
+    }
+    return true;
+#else
+    Q_UNUSED(mime);
+    return false;
+#endif
+}
+
+void ClipboardSync::serveFilePull(const QByteArray& payload)
+{
+    FilePull pull;
+    if (!FilePull::parse(payload, pull)) {
+        ClipboardLog::warn("ClipboardSync: dropping a malformed file chunk request");
+        return;
+    }
+    QUrl url;
+    if (m_HostContext.address.isEmpty() || m_HostContext.httpsPort == 0 ||
+        m_HostContext.serverCertificate.isNull()) {
+        return;
+    }
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(m_HostContext.address);
+    url.setPort(m_HostContext.httpsPort);
+    url.setPath(QStringLiteral("/api/v1/file-transfer/chunk/") + pull.ticket);
+
+    const LocalFileOffers::Chunk chunk =
+        m_LocalFileOffers->read(pull.id, pull.index, pull.offset, pull.length);
+    QNetworkRequest req(url);
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                     QNetworkRequest::ManualRedirectPolicy);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/octet-stream"));
+    if (!chunk.error.isEmpty()) {
+        req.setRawHeader("X-File-Transfer-Error", chunk.error);
+        ClipboardLog::warn(
+            "ClipboardSync: the host asked for a copied file that cannot be read (%s)",
+            chunk.error.constData());
+    }
+    QSslConfiguration sslConfig(QSslConfiguration::defaultConfiguration());
+    sslConfig.setLocalCertificate(m_HostContext.clientCertificate);
+    sslConfig.setPrivateKey(m_HostContext.clientPrivateKey);
+    req.setSslConfiguration(sslConfig);
+
+    QNetworkReply* reply = nam()->post(req, chunk.bytes);
+    auto* timeout = new QTimer(reply);
+    timeout->setSingleShot(true);
+    connect(timeout, &QTimer::timeout, reply, &QNetworkReply::abort);
+    timeout->start(60000);
+    connect(reply, &QNetworkReply::finished, this, [reply]() {
+        reply->deleteLater();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300) {
+            ClipboardLog::warn(
+                "ClipboardSync: sending a file chunk to the host failed (HTTP %d, %s)", status,
+                reply->errorString().toUtf8().constData());
+        }
+    });
 }
 
 void ClipboardSync::applyInboundText(const QByteArray& payload)
@@ -1158,7 +1262,9 @@ void ClipboardSync::onLocalClipboardChanged()
     if (finderOrigin) {
         beginClipboardChange();
         m_HaveClipboardSnapshot = false;
-        ClipboardLog::debug("ClipboardSync: Finder file clipboard detected; sync skipped");
+        if (!offerLocalFiles(mime)) {
+            ClipboardLog::debug("ClipboardSync: Finder file clipboard detected; sync skipped");
+        }
         return;
     }
 
@@ -1172,8 +1278,10 @@ void ClipboardSync::onLocalClipboardChanged()
     if (hasFileReferences(mime) && !havePng) {
         beginClipboardChange();
         m_HaveClipboardSnapshot = false;
-        ClipboardLog::debug(
-            "ClipboardSync: file clipboard without transferable image; sync skipped");
+        if (!offerLocalFiles(mime)) {
+            ClipboardLog::debug(
+                "ClipboardSync: file clipboard without transferable image; sync skipped");
+        }
         return;
     }
 

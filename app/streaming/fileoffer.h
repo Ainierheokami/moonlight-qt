@@ -17,8 +17,11 @@
 #include "virtualfilesource.h"
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QString>
+#include <QStringList>
 
+#include <deque>
 #include <memory>
 #include <vector>
 
@@ -55,4 +58,74 @@ public:
 
 private:
     std::shared_ptr<Core> m_Core;
+};
+
+class QFileInfo;
+
+// Files copied on this client, offered to the host the other way round: the
+// offer above goes to the host (wire kind 4) and the host's agent pastes it by
+// asking for one chunk at a time (wire kind 5, a FilePull). The client answers
+// each with POST /api/v1/file-transfer/chunk/<ticket> on the paired HTTPS port.
+// Nothing is read before the host pastes.
+class LocalFileOffers
+{
+public:
+    // Offers kept at once; adding another forgets the oldest.
+    static constexpr int MAX_OFFERS = 4;
+    // How long an offer can still be pasted on the host.
+    static constexpr qint64 TTL_MS = 60LL * 60 * 1000;
+    // Largest chunk the host may ask for (Sunshine's file_transfer_pull::kMaxChunk).
+    static constexpr quint64 MAX_CHUNK = 4ULL * 1024 * 1024;
+
+    LocalFileOffers();
+
+    // Lists `paths` (absolute local paths; a folder with everything below it,
+    // parents first, symbolic links and junctions left out) and remembers the
+    // result under a new id. On success `json` is the offer to send.
+    bool add(const QStringList& paths, QByteArray& json, QString* error = nullptr);
+
+    struct Chunk
+    {
+        QByteArray bytes;
+        // Empty on success, otherwise the word sent to the host:
+        // "not_found" (no such offer or entry), "gone" (cannot open or read),
+        // "changed" (the size differs from the offer), "range" (offset past the end).
+        QByteArray error;
+    };
+    // Reads at most `length` bytes of entry `index` from `offset`.
+    Chunk read(const QString& id, qint64 index, quint64 offset, quint64 length);
+
+    void clear();
+
+private:
+    struct Item
+    {
+        QString localPath;
+        quint64 size = 0;
+        bool dir = false;
+    };
+    struct Offer
+    {
+        QString id;
+        std::vector<Item> items;
+        qint64 createdMs = 0;
+    };
+    void expire();
+    static bool isLink(const QFileInfo& info);
+
+    std::deque<Offer> m_Offers;
+    QElapsedTimer m_Clock;
+};
+
+// The host's request for a chunk of a local offer (wire kind 5):
+// {"ticket": "<32 hex>", "id": "<uuid>", "index": N, "offset": N, "length": N}
+struct FilePull
+{
+    QString ticket;
+    QString id;
+    qint64 index = 0;
+    quint64 offset = 0;
+    quint64 length = 0;
+
+    static bool parse(const QByteArray& json, FilePull& out);
 };

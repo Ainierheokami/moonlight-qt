@@ -4,6 +4,7 @@
 #include "streaming/fileoffer.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
@@ -14,6 +15,7 @@
 #include <QSslKey>
 #include <QSslSocket>
 #include <QTcpServer>
+#include <QTemporaryDir>
 #include <QTextStream>
 #include <QThread>
 
@@ -159,6 +161,111 @@ ReadResult readAll(VirtualFiles::Source& source, std::size_t index, std::uint64_
     return result;
 }
 
+bool writeFile(const QString& path, const QByteArray& bytes)
+{
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size();
+}
+
+QByteArray pullJson(const QJsonObject& overrides)
+{
+    QJsonObject obj{ { "ticket", "0123456789abcdef0123456789abcdef" },
+                     { "id", kId },
+                     { "index", 2 },
+                     { "offset", 0 },
+                     { "length", 4096 } };
+    for (auto it = overrides.begin(); it != overrides.end(); ++it) {
+        obj.insert(it.key(), it.value());
+    }
+    return QJsonDocument(obj).toJson(QJsonDocument::Compact);
+}
+
+bool runLocalFileOffers(QTextStream& err)
+{
+    bool ok = true;
+    QTemporaryDir tmp;
+    if (!check(tmp.isValid(), "temporary folder", err)) {
+        return false;
+    }
+    const QDir root(tmp.path());
+    QByteArray big(LocalFileOffers::MAX_CHUNK + 1000, Qt::Uninitialized);
+    for (int i = 0; i < big.size(); ++i) {
+        big[i] = static_cast<char>((i * 17) & 0xFF);
+    }
+    root.mkpath(QStringLiteral("dir/sub"));
+    ok &= check(writeFile(root.filePath("a.txt"), "hello") &&
+                    writeFile(root.filePath("dir/b.bin"), big),
+                "fixture files", err);
+#ifndef Q_OS_WIN
+    // A link inside a copied folder is left out.
+    QFile::link(root.filePath("a.txt"), root.filePath("dir/link.txt"));
+#endif
+
+    LocalFileOffers local;
+    QByteArray json;
+    QString error;
+    ok &= check(local.add({ root.filePath("a.txt"), root.filePath("dir") }, json, &error),
+                "copied files are offered", err);
+    FileOffer offer;
+    ok &= check(FileOffer::parse(json, offer), "the offer passes the host's rules", err);
+    ok &= check(offer.entries.size() == 4 && offer.entries[0].path == u"a.txt" &&
+                    offer.entries[1].path == u"dir" && offer.entries[1].dir &&
+                    offer.entries[2].path == u"dir\\b.bin" &&
+                    offer.entries[2].size == static_cast<quint64>(big.size()) &&
+                    offer.entries[3].path == u"dir\\sub" &&
+                    offer.totalSize == static_cast<quint64>(big.size()) + 5,
+                "folders listed before their contents, links left out", err);
+
+    auto chunk = local.read(offer.id, 2, 0, LocalFileOffers::MAX_CHUNK);
+    ok &= check(chunk.error.isEmpty() && chunk.bytes == big.left(LocalFileOffers::MAX_CHUNK),
+                "a chunk is read from the start", err);
+    chunk = local.read(offer.id, 2, LocalFileOffers::MAX_CHUNK, LocalFileOffers::MAX_CHUNK);
+    ok &= check(chunk.error.isEmpty() && chunk.bytes == big.mid(LocalFileOffers::MAX_CHUNK),
+                "the last chunk is shorter", err);
+    chunk = local.read(offer.id, 0, 1, 2);
+    ok &= check(chunk.error.isEmpty() && chunk.bytes == "el", "a chunk from an offset", err);
+    chunk = local.read(offer.id, 0, 5, 10);
+    ok &= check(chunk.error.isEmpty() && chunk.bytes.isEmpty(), "reading at the end gives nothing",
+                err);
+    ok &= check(local.read(offer.id, 0, 6, 1).error == "range", "past the end is refused", err);
+    ok &= check(local.read(offer.id, 1, 0, 1).error == "not_found", "a folder has no bytes", err);
+    ok &= check(local.read(offer.id, 9, 0, 1).error == "not_found", "no such entry", err);
+    ok &= check(local.read(kId, 0, 0, 1).error == "not_found", "no such offer", err);
+
+    writeFile(root.filePath("a.txt"), "changed!");
+    ok &= check(local.read(offer.id, 0, 0, 5).error == "changed", "a file that changed size", err);
+    QFile::remove(root.filePath("a.txt"));
+    ok &= check(local.read(offer.id, 0, 0, 5).error == "gone", "a file that went away", err);
+
+    root.mkpath(QStringLiteral("other"));
+    writeFile(root.filePath("other/A.TXT"), "x");
+    writeFile(root.filePath("dir/a.txt"), "y");
+    ok &= check(!local.add({ root.filePath("other/A.TXT"), root.filePath("dir/a.txt") }, json),
+                "two copied files with the same name are refused", err);
+    ok &= check(!local.add({ root.filePath("missing") }, json), "a missing path is refused", err);
+
+    for (int i = 0; i < LocalFileOffers::MAX_OFFERS; ++i) {
+        local.add({ root.filePath("dir/a.txt") }, json);
+    }
+    ok &= check(local.read(offer.id, 2, 0, 1).error == "not_found",
+                "the oldest offer is forgotten past the limit", err);
+    local.clear();
+
+    FilePull pull;
+    ok &= check(FilePull::parse(pullJson({}), pull) && pull.index == 2 && pull.length == 4096 &&
+                    pull.ticket.size() == 32,
+                "a chunk request parses", err);
+    ok &= check(!FilePull::parse(pullJson({ { "ticket", "../x" } }), pull), "bad ticket", err);
+    ok &= check(!FilePull::parse(pullJson({ { "id", "x" } }), pull), "bad offer id", err);
+    ok &= check(!FilePull::parse(pullJson({ { "length", 0 } }), pull), "empty chunk", err);
+    ok &= check(
+        !FilePull::parse(pullJson({ { "length", double(LocalFileOffers::MAX_CHUNK + 1) } }), pull),
+        "chunk over the limit", err);
+    ok &= check(!FilePull::parse(pullJson({ { "offset", -1 } }), pull), "negative offset", err);
+    ok &= check(!FilePull::parse(pullJson({ { "index", 1.5 } }), pull), "fractional index", err);
+    return ok;
+}
+
 } // namespace
 
 bool runFileOfferRegression(QTextStream& err)
@@ -203,6 +310,9 @@ bool runFileOfferRegression(QTextStream& err)
                 "bad id rejected", err);
     ok &= check(!parses(offerJson({})), "empty offer rejected", err);
     ok &= check(!parses("[1]"), "non-object rejected", err);
+
+    // ---- Files copied on this client ----
+    ok &= runLocalFileOffers(err);
 
     // ---- Downloads ----
     FileServer server;

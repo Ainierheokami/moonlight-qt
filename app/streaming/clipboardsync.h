@@ -18,6 +18,9 @@
 
 #include "virtualfilesource.h"
 
+class LocalFileOffers;
+class QMimeData;
+
 class QImage;
 class QMimeData;
 class QNetworkAccessManager;
@@ -148,6 +151,9 @@ public:
         KIND_PNG = 2,
         KIND_REF = 3,
         KIND_FILE_OFFER = 4,
+        // Host -> client: the host pastes files this client offered and asks
+        // for one chunk (see FilePull in fileoffer.h).
+        KIND_FILE_PULL = 5,
     };
 
     static constexpr uint8_t WIRE_VERSION = 1;
@@ -300,6 +306,10 @@ private:
                    const std::function<void(const QByteArray&, const QString&)>& onFetched);
     void applyInboundText(const QByteArray& payload);
     void applyInboundFileOffer(const QByteArray& payload);
+    // Files copied here: offer them to the host, and serve its chunk requests.
+    // Returns false when the clipboard holds no local files.
+    bool offerLocalFiles(const QMimeData* mime);
+    void serveFilePull(const QByteArray& payload);
     void applyInboundPng(const QByteArray& payload);
 
     // Compound burst aggregation (see class comment).
@@ -323,6 +333,9 @@ private:
     QElapsedTimer m_Clock;
     QQueue<QPair<quint32, qint64>> m_RetiredTokens;
     QSet<QNetworkReply*> m_BlobReplies;
+    std::unique_ptr<LocalFileOffers> m_LocalFileOffers;
+    QStringList m_LastOfferedPaths;
+    qint64 m_LastOfferedAtMs = -1;
     QHash<quint32, BurstState> m_PendingBursts;
     quint32 m_NextToken = 1;
 

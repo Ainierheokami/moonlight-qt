@@ -2,6 +2,10 @@
 #include "clipboardlogging.h"
 #include "backend/pairedcertificate.h"
 
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -15,6 +19,7 @@
 #include <QSslConfiguration>
 #include <QThread>
 #include <QUrl>
+#include <QUuid>
 
 #include <algorithm>
 #include <chrono>
@@ -22,6 +27,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <mutex>
 
@@ -480,4 +486,197 @@ std::unique_ptr<VirtualFiles::Reader> FileOfferDownloader::open(std::size_t inde
         core->context, [core, st, index, offset]() { core->start(st, index, offset); },
         Qt::QueuedConnection);
     return std::make_unique<HttpReader>(m_Core, st);
+}
+
+// ---- Files copied on this client ----
+
+LocalFileOffers::LocalFileOffers()
+{
+    m_Clock.start();
+}
+
+void LocalFileOffers::expire()
+{
+    while (!m_Offers.empty() && m_Clock.elapsed() - m_Offers.front().createdMs > TTL_MS) {
+        m_Offers.pop_front();
+    }
+}
+
+void LocalFileOffers::clear()
+{
+    m_Offers.clear();
+}
+
+bool LocalFileOffers::add(const QStringList& paths, QByteArray& json, QString* error)
+{
+    expire();
+    Offer offer;
+    offer.id = QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
+    offer.createdMs = m_Clock.elapsed();
+    QJsonArray files;
+    quint64 total = 0;
+    QString failure;
+
+    // Appends `info` as `relative` and, for a folder, everything below it.
+    std::function<bool(const QFileInfo&, const QString&)> append =
+        [&](const QFileInfo& info, const QString& relative) -> bool {
+        if (static_cast<int>(offer.items.size()) >= FileOffer::MAX_ENTRIES) {
+            failure = QStringLiteral("too many entries");
+            return false;
+        }
+        const bool dir = info.isDir();
+        Item item;
+        item.localPath = info.absoluteFilePath();
+        item.dir = dir;
+        item.size = dir ? 0 : static_cast<quint64>(std::max<qint64>(info.size(), 0));
+        offer.items.push_back(item);
+        total += item.size;
+        files.append(QJsonObject{
+            { QStringLiteral("path"), relative },
+            { QStringLiteral("size"), static_cast<double>(item.size) },
+            { QStringLiteral("dir"), dir },
+            { QStringLiteral("mtime"),
+              static_cast<double>(info.lastModified().toSecsSinceEpoch()) },
+        });
+        if (!dir) {
+            return true;
+        }
+        const QFileInfoList children = QDir(info.absoluteFilePath())
+                                           .entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot |
+                                                              QDir::Hidden | QDir::System,
+                                                          QDir::Name | QDir::IgnoreCase);
+        for (const QFileInfo& child : children) {
+            if (isLink(child)) {
+                continue;
+            }
+            if (!append(child, relative + QLatin1Char('/') + child.fileName())) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    for (const QString& path : paths) {
+        const QFileInfo info(path);
+        if (!info.exists()) {
+            return fail(error, QStringLiteral("not found: ") + path);
+        }
+        if (isLink(info) || info.fileName().isEmpty()) {
+            // A link, or a drive root such as C:\, which has no name to paste under.
+            return fail(error, QStringLiteral("unsupported: ") + path);
+        }
+        if (!append(info, info.fileName())) {
+            return fail(error, failure);
+        }
+    }
+    if (offer.items.empty()) {
+        return fail(error, QStringLiteral("no files"));
+    }
+
+    json = QJsonDocument(QJsonObject{
+                             { QStringLiteral("id"), offer.id },
+                             { QStringLiteral("type"), QStringLiteral("clipboard") },
+                             { QStringLiteral("total_size"), static_cast<double>(total) },
+                             { QStringLiteral("expires_in"), static_cast<double>(TTL_MS / 1000) },
+                             { QStringLiteral("files"), files },
+                         })
+               .toJson(QJsonDocument::Compact);
+
+    // The host applies the same rules (names Windows rejects, MAX_PATH,
+    // duplicates); refuse here what it would refuse there.
+    FileOffer check;
+    QString reason;
+    if (!FileOffer::parse(json, check, &reason)) {
+        return fail(error, reason);
+    }
+
+    m_Offers.push_back(std::move(offer));
+    while (static_cast<int>(m_Offers.size()) > MAX_OFFERS) {
+        m_Offers.pop_front();
+    }
+    return true;
+}
+
+bool LocalFileOffers::isLink(const QFileInfo& info)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
+    return info.isSymbolicLink() || info.isJunction();
+#else
+    return info.isSymLink() && !info.isShortcut();
+#endif
+}
+
+LocalFileOffers::Chunk LocalFileOffers::read(const QString& id, qint64 index, quint64 offset,
+                                             quint64 length)
+{
+    expire();
+    Chunk out;
+    const auto offer = std::find_if(m_Offers.begin(), m_Offers.end(),
+                                    [&id](const Offer& o) { return o.id == id; });
+    if (offer == m_Offers.end() || index < 0 || index >= static_cast<qint64>(offer->items.size()) ||
+        offer->items[static_cast<std::size_t>(index)].dir) {
+        out.error = "not_found";
+        return out;
+    }
+    const Item& item = offer->items[static_cast<std::size_t>(index)];
+    QFile file(item.localPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        out.error = "gone";
+        return out;
+    }
+    if (static_cast<quint64>(file.size()) != item.size) {
+        out.error = "changed";
+        return out;
+    }
+    if (offset > item.size) {
+        out.error = "range";
+        return out;
+    }
+    const quint64 want = std::min({ length, item.size - offset, MAX_CHUNK });
+    if (want == 0) {
+        return out;
+    }
+    if (!file.seek(static_cast<qint64>(offset))) {
+        out.error = "gone";
+        return out;
+    }
+    out.bytes = file.read(static_cast<qint64>(want));
+    if (static_cast<quint64>(out.bytes.size()) != want) {
+        out.bytes.clear();
+        out.error = "gone";
+    }
+    return out;
+}
+
+bool FilePull::parse(const QByteArray& json, FilePull& out)
+{
+    out = FilePull();
+    const QJsonDocument doc = QJsonDocument::fromJson(json);
+    if (!doc.isObject()) {
+        return false;
+    }
+    const QJsonObject obj = doc.object();
+    static const QRegularExpression ticketPattern(QStringLiteral("^[0-9a-f]{32}$"));
+    static const QRegularExpression idPattern(
+        QStringLiteral("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"));
+    out.ticket = obj.value(QStringLiteral("ticket")).toString();
+    out.id = obj.value(QStringLiteral("id")).toString();
+    if (!ticketPattern.match(out.ticket).hasMatch() || !idPattern.match(out.id).hasMatch()) {
+        return false;
+    }
+    const auto integer = [&obj](const char* key, double max, double& value) {
+        value = obj.value(QLatin1String(key)).toDouble(-1);
+        return std::isfinite(value) && value >= 0 && value <= max && std::floor(value) == value;
+    };
+    double index = 0, offset = 0, length = 0;
+    if (!integer("index", FileOffer::MAX_ENTRIES - 1, index) ||
+        !integer("offset", MAX_JSON_INTEGER, offset) ||
+        !integer("length", static_cast<double>(LocalFileOffers::MAX_CHUNK), length) ||
+        length == 0) {
+        return false;
+    }
+    out.index = static_cast<qint64>(index);
+    out.offset = static_cast<quint64>(offset);
+    out.length = static_cast<quint64>(length);
+    return true;
 }
