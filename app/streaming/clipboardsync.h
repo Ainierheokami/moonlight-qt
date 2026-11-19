@@ -13,6 +13,10 @@
 #include <QStringList>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <vector>
+
+#include "virtualfilesource.h"
 
 class QImage;
 class QMimeData;
@@ -67,6 +71,15 @@ public:
     // set (text + image + raw image/png) used by applyCompound().
     bool writeClipboard(const QString& text, const QImage& image, const QByteArray& pngBytes);
 
+#ifdef Q_OS_WIN
+    // Put files the host copied on the clipboard; their contents are fetched
+    // from `source` when a paste target reads them (virtualfileclipboard_win.h).
+    bool writeVirtualFiles(std::vector<VirtualFiles::Entry> entries,
+                           std::shared_ptr<VirtualFiles::Source> source);
+    // Empty the clipboard if it still holds those files (the session ends).
+    void clearVirtualFiles();
+#endif
+
 signals:
     void clipboardDataChanged();
 
@@ -86,7 +99,10 @@ private:
 // pointing to an out-of-band blob transferred over HTTPS via the Sunshine
 // /api/v1/clipboard/blob endpoints) in both directions. Payloads above the
 // 65 KB single-packet cap are switched to KIND_REF transparently.
-// File / other payloads are accepted on the wire but ignored.
+// kind=4 (FILE_OFFER) is the JSON offer of files the host copied
+// (fileoffer.h). On Windows the files go on the clipboard as virtual files
+// whose contents are fetched from Sunshine only when pasted; elsewhere the
+// offer is ignored. Local file copies are still never sent.
 //
 // Compound clipboard (v2, no wire-format change): a clipboard change that
 // carries BOTH text and an image is emitted as two consecutive frames
@@ -130,6 +146,7 @@ public:
         KIND_TEXT = 1,
         KIND_PNG  = 2,
         KIND_REF  = 3,
+        KIND_FILE_OFFER = 4,
     };
 
     static constexpr uint8_t WIRE_VERSION = 1;
@@ -281,6 +298,7 @@ private:
                    qint64 advertisedSize,
                    const std::function<void(const QByteArray&, const QString&)>& onFetched);
     void applyInboundText(const QByteArray& payload);
+    void applyInboundFileOffer(const QByteArray& payload);
     void applyInboundPng(const QByteArray& payload);
 
     // Compound burst aggregation (see class comment).

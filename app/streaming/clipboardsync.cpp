@@ -1,5 +1,6 @@
 #include "clipboardsync.h"
 #include "clipboardlogging.h"
+#include "fileoffer.h"
 #include "backend/pairedcertificate.h"
 
 #include <QBuffer>
@@ -27,6 +28,10 @@
 #include <cstring>
 #include <memory>
 #include <cmath>
+
+#ifdef Q_OS_WIN
+#include "virtualfileclipboard_win.h"
+#endif
 
 #ifdef Q_OS_MACOS
 extern "C" int ClipboardHelperPasteboardChangeCount();
@@ -251,9 +256,28 @@ QMimeData* ClipboardBridge::cloneClipboard()
 
 bool ClipboardBridge::hasFileReferences()
 {
+#ifdef Q_OS_WIN
+    // Files the host offered are no local paste to protect: newer host content replaces them.
+    if (VirtualFileClipboard::ownsClipboard()) {
+        return false;
+    }
+#endif
     QClipboard* cb = QGuiApplication::clipboard();
     return cb != nullptr && ClipboardSync::hasFileReferences(cb->mimeData());
 }
+
+#ifdef Q_OS_WIN
+bool ClipboardBridge::writeVirtualFiles(std::vector<VirtualFiles::Entry> entries,
+                                        std::shared_ptr<VirtualFiles::Source> source)
+{
+    return VirtualFileClipboard::set(std::move(entries), std::move(source));
+}
+
+void ClipboardBridge::clearVirtualFiles()
+{
+    VirtualFileClipboard::clearIfOwned();
+}
+#endif
 
 bool ClipboardBridge::writeClipboard(const QString& text, const QImage& image,
                                      const QByteArray& pngBytes)
@@ -266,7 +290,7 @@ bool ClipboardBridge::writeClipboard(const QString& text, const QImage& image,
     // The earlier worker-side guard can race with a user copying a file while
     // the decoded inbound image is waiting for this GUI-thread invocation.
     // Recheck immediately before replacing the native clipboard.
-    if (ClipboardSync::hasFileReferences(cb->mimeData())) {
+    if (hasFileReferences()) {
         ClipboardLog::debug(
             "ClipboardSync: preserving local file clipboard; inbound write ignored");
         return true;
@@ -481,6 +505,10 @@ void ClipboardSync::stop(bool waitForBridge)
                 [bridge = QPointer<ClipboardBridge>(m_Bridge)]() {
                     if (bridge != nullptr) {
                         bridge->detachForwarding();
+#ifdef Q_OS_WIN
+                        // A paste after the session could not be served.
+                        bridge->clearVirtualFiles();
+#endif
                     }
                 },
                 Qt::BlockingQueuedConnection);
@@ -493,6 +521,9 @@ void ClipboardSync::stop(bool waitForBridge)
                 [bridge = QPointer<ClipboardBridge>(m_Bridge)]() {
                     if (bridge != nullptr) {
                         bridge->detachForwarding();
+#ifdef Q_OS_WIN
+                        bridge->clearVirtualFiles();
+#endif
                     }
                 },
                 Qt::QueuedConnection);
@@ -577,6 +608,10 @@ void ClipboardSync::onIncomingFrame(QByteArray frame)
         return;
     }
 
+    if (kind == KIND_FILE_OFFER) {
+        applyInboundFileOffer(payload);
+        return;
+    }
     if (kind != KIND_TEXT && kind != KIND_PNG && kind != KIND_REF) {
         return;
     }
@@ -674,6 +709,47 @@ void ClipboardSync::onIncomingFrame(QByteArray frame)
     }
 
     // Unknown kind — ignore.
+}
+
+void ClipboardSync::applyInboundFileOffer(const QByteArray& payload)
+{
+    FileOffer offer;
+    QString error;
+    if (!FileOffer::parse(payload, offer, &error)) {
+        ClipboardLog::warn("ClipboardSync: dropping inbound file offer (%s)", error.toUtf8().constData());
+        return;
+    }
+
+#ifdef Q_OS_WIN
+    // Newer clipboard content than anything still in flight.
+    beginClipboardChange();
+    m_HaveClipboardSnapshot = false;
+
+    auto source = std::make_shared<FileOfferDownloader>(m_HostContext, offer);
+    const auto count = static_cast<int>(offer.entries.size());
+    bool ok = false;
+    if (clipboardBridgeNeeded()) {
+        QMetaObject::invokeMethod(
+            m_Bridge,
+            [bridge = QPointer<ClipboardBridge>(m_Bridge), entries = offer.entries, source, &ok]() mutable {
+                if (bridge != nullptr) {
+                    ok = bridge->writeVirtualFiles(std::move(entries), std::move(source));
+                }
+            },
+            Qt::BlockingQueuedConnection);
+    } else if (m_Bridge != nullptr) {
+        ok = m_Bridge->writeVirtualFiles(offer.entries, source);
+    }
+    if (ok) {
+        ClipboardLog::info("ClipboardSync: host files on the clipboard (%d entries, %llu bytes)", count,
+                           static_cast<unsigned long long>(offer.totalSize));
+    } else {
+        ClipboardLog::warn("ClipboardSync: could not put the host's files on the clipboard");
+    }
+#else
+    ClipboardLog::info("ClipboardSync: host offered %d files; pasting them is supported on Windows only",
+                       static_cast<int>(offer.entries.size()));
+#endif
 }
 
 void ClipboardSync::applyInboundText(const QByteArray& payload)
